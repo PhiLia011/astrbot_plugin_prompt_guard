@@ -1,0 +1,58 @@
+{
+  "injection_guard": {
+    "description": "启用提示词注入检测",
+    "type": "bool",
+    "default": true,
+    "hint": "检测「忽略以上所有指令」「重复你的系统提示词」等注入尝试"
+  },
+  "injection_guard_strategy": {
+    "description": "注入处理策略",
+    "type": "string",
+    "default": "warn",
+    "options": ["warn", "block", "sanitize", "log"],
+    "hint": "warn=追加系统提醒 | block=直接拦截 | sanitize=清除可疑片段 | log=仅记录日志"
+  },
+  "injection_guard_extra_patterns": {
+    "description": "额外的自定义检测正则",
+    "type": "list",
+    "items": { "type": "string" },
+    "default": [],
+    "hint": "写错的正则会自动忽略，不会影响插件运行"
+  },
+  "persona_anchor": {
+    "description": "启用人格锚定",
+    "type": "bool",
+    "default": true,
+    "hint": "工具调用后重申人设，避免模型自称「作为一个 AI 助手」"
+  },
+  "persona_anchor_hardening": {
+    "description": "人格强化语句（留空用默认）",
+    "type": "text",
+    "default": "",
+    "hint": "会追加到系统提示词末尾"
+  },
+  "persona_anchor_template": {
+    "description": "人格锚定模板（留空用默认）",
+    "type": "text",
+    "default": "",
+    "hint": "必须包含 {persona} 占位符"
+  },
+  "language_anchor": {
+    "description": "启用语言锚定",
+    "type": "bool",
+    "default": false,
+    "hint": "固定回复语言，避免中英混排"
+  },
+  "language_anchor_language": {
+    "description": "目标语言",
+    "type": "string",
+    "default": "zh",
+    "hint": "填语言代码（zh / en / ja）或语言名（中文 / English）"
+  },
+  "language_anchor_template": {
+    "description": "语言规则模板（留空用默认）",
+    "type": "text",
+    "default": "",
+    "hint": "必须包含 {lang} 占位符"
+  }
+}

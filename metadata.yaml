@@ -1,0 +1,5 @@
+name: astrbot_plugin_prompt_guard
+desc: 提示词注入防护 + 人格锚定 + 语言锚定：检测并处理绕过人设、套取系统提示词、越狱等注入尝试，同时在工具调用后重申人设，并避免中英混排
+author: Firefly
+version: 1.0.0
+repo: https://github.com/PhiLia011/astrbot_plugin_prompt_guard

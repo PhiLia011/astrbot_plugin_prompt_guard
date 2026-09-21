@@ -1,5 +1,19 @@
 name: astrbot_plugin_prompt_guard
-desc: 提示词注入防护 + 人格锚定 + 语言锚定：检测并处理绕过人设、套取系统提示词、越狱等注入尝试，同时在工具调用后重申人设，并避免中英混排
+display_name: 提示词注入防护与人格锚定
+short_desc: 拦截提示词注入，并在每轮请求重申人设与回复语言
+desc: |
+  提示词注入防护 + 人格锚定 + 语言锚定：检测并处理绕过人设、套取系统提示词、
+  越狱等注入尝试，同时在工具调用后重申人设，并避免中英混排。
+
+  注入检测支持 warn / block / sanitize / log 四种策略；block 通过终止事件传播
+  真正拦住该轮请求（消息不会发送给模型）。扫描范围默认包含用户本条消息、
+  引用消息与插件注入的内容块，可另外开启历史上下文扫描。零宽字符与 base64
+  载荷这两类编码弱信号单独命中时不触发策略，避免把正常粘贴当成攻击。
+version: 1.1.0
 author: Firefly
-version: 1.0.0
 repo: https://github.com/PhiLia011/astrbot_plugin_prompt_guard
+astrbot_version: ">=4.0.0"
+tags:
+  - 安全
+  - 提示词
+  - 人格

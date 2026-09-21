@@ -1,0 +1,362 @@
+"""提示词注入检测。
+
+检测文本里试图劫持指令、套取系统提示词、越狱、伪造分隔符或做编码混淆的
+内容。检测结果按策略处理：拦截 / 清洗 / 警告 / 仅记录。
+
+本模块只依赖标准库，不导入 AstrBot 的任何模块，因此可以单独测试。
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import re
+import unicodedata
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+
+__all__ = [
+    "DEFAULT_RULES",
+    "HEURISTIC_RULE_NAMES",
+    "STRATEGY_BLOCK",
+    "STRATEGY_LOG",
+    "STRATEGY_SANITIZE",
+    "STRATEGY_WARN",
+    "VALID_STRATEGIES",
+    "InjectionGuardResult",
+    "InjectionMatch",
+    "PromptInjectionGuard",
+    "has_confirmed_match",
+]
+
+STRATEGY_BLOCK = "block"
+STRATEGY_SANITIZE = "sanitize"
+STRATEGY_WARN = "warn"
+STRATEGY_LOG = "log"
+
+VALID_STRATEGIES = (STRATEGY_BLOCK, STRATEGY_SANITIZE, STRATEGY_WARN, STRATEGY_LOG)
+
+# 这两条是「弱信号」：零宽字符和 base64 长串在正常文本里也偶有出现，
+# 单独命中时不驱动策略，只写日志，避免把普通粘贴当成攻击拦掉。
+HEURISTIC_RULE_NAMES = frozenset({"pi_zero_width", "pi_base64_payload"})
+
+
+@dataclass(frozen=True)
+class Rule:
+    name: str
+    pattern: re.Pattern[str]
+    severity: str = "medium"
+    description: str = ""
+
+
+def _rule(name: str, pattern: str, severity: str, description: str) -> Rule:
+    return Rule(
+        name=name,
+        pattern=re.compile(pattern, re.IGNORECASE | re.MULTILINE),
+        severity=severity,
+        description=description,
+    )
+
+
+DEFAULT_RULES: tuple[Rule, ...] = (
+    _rule(
+        "pi_ignore_instructions",
+        r"(?<![我俺咱])(忽略|无视|忘记|抛弃|不要理会|请忽略|请无视)[^。\n]{0,12}"
+        r"(以上|上面|之前|前面|所有|全部|先前)[^。\n]{0,12}"
+        r"(指令|指示|命令|要求|设定|规则|提示|prompt|instruction)",
+        "high",
+        "中文：要求忽略之前的指令",
+    ),
+    _rule(
+        "pi_ignore_instructions_en",
+        r"\b(ignore|disregard|forget|override|discard)\b[^.!?\n]{0,30}"
+        r"\b(previous|prior|above|earlier|all|any)\b[^.!?\n]{0,20}"
+        r"\b(instruction|prompt|rule|command|direction)s?\b",
+        "high",
+        "英文：要求忽略之前的指令",
+    ),
+    _rule(
+        "pi_reveal_system_prompt",
+        r"(重复|复述|输出|打印|告诉我|显示|展示|说出)[^。\n]{0,12}"
+        r"(你的|你的所有|系统|初始|原始|上面|前面)[^。\n]{0,8}"
+        r"(提示词|设定|指令|规则|prompt|system\s*prompt|设定词)",
+        "high",
+        "中文：试图套取系统提示词",
+    ),
+    _rule(
+        "pi_reveal_system_prompt_en",
+        r"\b(repeat|print|show|reveal|output|tell me|display|dump)\b[^.!?\n]{0,25}"
+        r"\b(your|the)\b[^.!?\n]{0,15}"
+        r"\b(system\s*prompt|initial\s*prompt|instructions?|rules?|prompt)\b",
+        "high",
+        "英文：试图套取系统提示词",
+    ),
+    _rule(
+        "pi_role_hijack",
+        r"(?:从现在起|从现在开始|现在开始|接下来|之后)[^。\n]{0,6}"
+        r"(?:扮演|充当|假装|成为)"
+        r"|"
+        r"(?:从现在起|从现在开始|现在开始|接下来|之后)[^。\n]{0,4}"
+        r"(?:你|您)[^。\n]{0,4}(?:就是|是|变成|化身)",
+        "medium",
+        "中文：要求改变角色身份",
+    ),
+    _rule(
+        "pi_role_hijack_en",
+        r"\b(from now on|starting now|henceforth)\b[^.!?\n]{0,30}"
+        r"\b(you are|act as|pretend|behave as|become)\b",
+        "medium",
+        "英文：要求改变角色身份",
+    ),
+    _rule(
+        "pi_jailbreak_keyword",
+        r"(DAN\s*mode|DAN模式|do\s*anything\s*now|developer\s*mode|god\s*mode|"
+        r"jailbreak|unrestricted\s*mode|no\s*restrictions?\s*mode)",
+        "high",
+        "已知越狱模式关键词",
+    ),
+    _rule(
+        "pi_jailbreak_cn",
+        r"(开发者模式|上帝模式|无限制模式|无任何限制|不受任何限制|"
+        r"解除(所有)?限制|绕过(所有)?(限制|审查|过滤)|越狱模式)",
+        "high",
+        "中文越狱关键词",
+    ),
+    _rule(
+        "pi_fake_delimiter",
+        r"(<\|im_start\|>|<\|im_end\|>|<\|system\|>|<\|user\|>|<\|assistant\|>|"
+        r"\[/?INST\]|<<SYS>>|\[/?SYS\])",
+        "high",
+        "伪造对话模板分隔符",
+    ),
+    _rule(
+        "pi_fake_role_marker",
+        r"^\s*#{2,4}\s*(system|assistant|用户|系统|助手)\s*[:：]",
+        "medium",
+        "伪造角色分隔（Markdown 标题形式）",
+    ),
+    _rule(
+        "pi_override_safety",
+        r"(忽略|无视|关闭|取消|禁用|绕过)[^。\n]{0,10}"
+        r"(安全|审查|限制|过滤|规则|策略|规范)",
+        "high",
+        "中文：试图关闭安全限制",
+    ),
+    _rule(
+        "pi_override_safety_en",
+        r"\b(ignore|bypass|disable|turn off|remove)\b[^.!?\n]{0,25}"
+        r"\b(safety|security|filter|restriction|policy|guideline|guardrail)s?\b",
+        "high",
+        "英文：试图关闭安全限制",
+    ),
+)
+
+
+@dataclass
+class InjectionMatch:
+    rule: str
+    severity: str
+    description: str
+    matched_text: str
+    start: int = -1
+    end: int = -1
+
+
+@dataclass
+class InjectionGuardResult:
+    detected: bool = False
+    matches: list[InjectionMatch] = field(default_factory=list)
+    text: str = ""
+    action: str = "none"
+
+    @property
+    def max_severity(self) -> str:
+        order = {"low": 0, "medium": 1, "high": 2}
+        if not self.matches:
+            return "none"
+        return max((m.severity for m in self.matches), key=lambda s: order.get(s, 0))
+
+    def summary(self) -> str:
+        if not self.detected:
+            return "no injection detected"
+        names = ", ".join(sorted({m.rule for m in self.matches}))
+        return f"{len(self.matches)} match(es) [{self.max_severity}]: {names}"
+
+
+def has_confirmed_match(result: InjectionGuardResult) -> bool:
+    """判断某个来源的命中是否来自真正的注入规则。
+
+    Args:
+        result: 单个文本来源的检测结果。
+
+    Returns:
+        至少有一条命中不属于编码类弱信号时为 True。
+    """
+    return any(m.rule not in HEURISTIC_RULE_NAMES for m in result.matches)
+
+
+_ZERO_WIDTH = re.compile(r"[\u200b-\u200f\u202a-\u202e\ufeff]")
+# 边界断言必须把 '=' 补位留在匹配内：用 \b 收尾时正则会把补位回溯掉，
+# 匹配串长度不再是 4 的倍数，严格解码随即失败。
+_BASE64_BLOB = re.compile(
+    r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])"
+)
+
+
+def _strip_zero_width(text: str) -> tuple[str, bool]:
+    had = bool(_ZERO_WIDTH.search(text))
+    return _ZERO_WIDTH.sub("", text), had
+
+
+def _find_base64_payloads(text: str) -> list[str]:
+    """收集能解码成可打印内容的疑似 base64 片段。
+
+    Args:
+        text: 待检查文本，通常已经过 NFKC 归一化。
+
+    Returns:
+        按出现顺序排列的匹配片段。
+    """
+    found: list[str] = []
+    for blob in _BASE64_BLOB.findall(text):
+        # 粘贴时丢掉 '=' 补位的串补齐后依然合法，所以先补再试，不要直接丢弃。
+        padding = "=" * (-len(blob) % 4)
+        decoded: bytes | None = None
+        for candidate in (blob, blob + padding) if padding else (blob,):
+            try:
+                decoded = base64.b64decode(candidate, validate=True)
+                break
+            except (binascii.Error, ValueError):
+                continue
+        if decoded is None:
+            continue
+        printable = sum(1 for b in decoded if 32 <= b < 127) / max(len(decoded), 1)
+        if printable > 0.85 and len(decoded) >= 30:
+            found.append(blob)
+    return found
+
+
+class PromptInjectionGuard:
+    """按规则检测文本，并按策略给出处理动作。"""
+
+    def __init__(
+        self,
+        *,
+        extra_patterns: Iterable[str] | None = None,
+        ignore_rules: Iterable[str] | None = None,
+        enable_encoding_check: bool = True,
+    ) -> None:
+        ignored = set(ignore_rules or ())
+        self.rules: list[Rule] = [r for r in DEFAULT_RULES if r.name not in ignored]
+
+        for idx, pat in enumerate(extra_patterns or ()):
+            if not isinstance(pat, str):
+                continue
+            try:
+                self.rules.append(
+                    _rule(f"pi_custom_{idx}", pat, "medium", "用户自定义规则")
+                )
+            except (re.error, TypeError):
+                continue
+
+        self.enable_encoding_check = enable_encoding_check
+
+    def check(
+        self, text: str, *, strategy: str = STRATEGY_WARN
+    ) -> InjectionGuardResult:
+        """检测文本并按策略填充 ``action`` 与处理后的文本。
+
+        Args:
+            text: 待检测文本。
+            strategy: 命中后的处理策略，非法值回退为 ``warn``。
+
+        Returns:
+            检测结果，``text`` 字段是策略处理后的文本。
+        """
+        result = InjectionGuardResult(text=text)
+        if not text:
+            return result
+
+        normalized = unicodedata.normalize("NFKC", text)
+
+        if self.enable_encoding_check:
+            cleaned, had_zero = _strip_zero_width(normalized)
+            if had_zero:
+                result.matches.append(
+                    InjectionMatch(
+                        rule="pi_zero_width",
+                        severity="high",
+                        description="输入含零宽字符（常用于绕过关键词过滤）",
+                        matched_text="<zero-width chars>",
+                    )
+                )
+                normalized = cleaned
+
+            if _find_base64_payloads(normalized):
+                result.matches.append(
+                    InjectionMatch(
+                        rule="pi_base64_payload",
+                        severity="medium",
+                        description="输入含疑似 base64 编码载荷",
+                        matched_text="<base64 blob>",
+                    )
+                )
+
+        for rule in self.rules:
+            for m in rule.pattern.finditer(normalized):
+                result.matches.append(
+                    InjectionMatch(
+                        rule=rule.name,
+                        severity=rule.severity,
+                        description=rule.description,
+                        matched_text=m.group(0)[:120],
+                        start=m.start(),
+                        end=m.end(),
+                    )
+                )
+
+        if not result.matches:
+            return result
+
+        result.detected = True
+        chosen = strategy if strategy in VALID_STRATEGIES else STRATEGY_WARN
+
+        if chosen == STRATEGY_BLOCK:
+            result.action = "blocked"
+            result.text = ""
+        elif chosen == STRATEGY_SANITIZE:
+            result.action = "sanitized"
+            result.text = self.sanitize(text)
+        elif chosen == STRATEGY_LOG:
+            result.action = "logged"
+            result.text = text
+        else:
+            result.action = "warned"
+            result.text = text
+
+        return result
+
+    def sanitize(self, text: str) -> str:
+        """抹掉文本中被检出的注入载荷。
+
+        输入先做 NFKC 归一化并去除零宽字符，再套用规则，这样 ``check`` 在
+        混淆形态下检出的载荷在这里也能真正删掉，而不是原样留下。
+
+        Args:
+            text: 收到的原始输入。
+
+        Returns:
+            所有命中载荷都被替换为占位符后的文本。
+        """
+        out = unicodedata.normalize("NFKC", text)
+        if self.enable_encoding_check:
+            out = _ZERO_WIDTH.sub("", out)
+        for rule in self.rules:
+            out = rule.pattern.sub("[已移除可疑内容]", out)
+        if self.enable_encoding_check:
+            for blob in _find_base64_payloads(out):
+                out = out.replace(blob, "[已移除可疑内容]")
+        return out
+
+    def rule_names(self) -> list[str]:
+        return [r.name for r in self.rules]

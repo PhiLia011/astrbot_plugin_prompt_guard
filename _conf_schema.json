@@ -10,32 +10,78 @@
     "type": "string",
     "default": "warn",
     "options": ["warn", "block", "sanitize", "log"],
-    "hint": "warn=追加系统提醒 | block=直接拦截 | sanitize=清除可疑片段 | log=仅记录日志"
+    "hint": "warn=追加系统提醒 | block=直接拦截该条消息 | sanitize=清除可疑片段 | log=仅记录日志"
   },
   "injection_guard_extra_patterns": {
     "description": "额外的自定义检测正则",
     "type": "list",
-    "items": { "type": "string" },
     "default": [],
-    "hint": "写错的正则会自动忽略，不会影响插件运行"
+    "hint": "写错或类型不对的条目会自动忽略，只影响它自己，不会影响插件运行"
+  },
+  "injection_guard_scan_extra_parts": {
+    "description": "同时扫描引用消息与插件注入的内容块",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后只检查用户本条消息的文本；引用消息、知识库或其它插件附加的内容块不参与检测"
+  },
+  "injection_guard_scan_history": {
+    "description": "同时扫描历史上下文中的用户消息",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭：历史消息已写入会话，拦截会造成「上下文里已有载荷」的观感，建议先用 log 观察"
+  },
+  "injection_guard_history_depth": {
+    "description": "历史扫描的条数",
+    "type": "int",
+    "default": 3,
+    "hint": "只在上面的开关打开时生效，最多回溯几条用户消息"
+  },
+  "injection_guard_notify_on_block": {
+    "description": "拦截时回复一条提示",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后拦截是静默的，用户只会看到机器人没有回应"
+  },
+  "injection_guard_block_message": {
+    "description": "拦截提示文案（留空用默认）",
+    "type": "text",
+    "default": "",
+    "hint": "仅在策略为 block 且开启「拦截时回复一条提示」时使用",
+    "editor_mode": true
+  },
+  "injection_guard_warn_hint": {
+    "description": "warn 策略追加的安全提醒（留空用默认）",
+    "type": "text",
+    "default": "",
+    "hint": "以临时内容块的形式随本轮请求发送，不写入会话历史",
+    "editor_mode": true
   },
   "persona_anchor": {
     "description": "启用人格锚定",
     "type": "bool",
     "default": true,
-    "hint": "工具调用后重申人设，避免模型自称「作为一个 AI 助手」"
+    "hint": "每轮请求重申人设，避免模型自称「作为一个 AI 助手」"
+  },
+  "persona_anchor_name": {
+    "description": "锚定使用的人格",
+    "type": "string",
+    "default": "",
+    "_special": "select_persona",
+    "hint": "留空时自动识别：先读当前会话的人设，再读框架解析出的人格名"
   },
   "persona_anchor_hardening": {
     "description": "人格强化语句（留空用默认）",
     "type": "text",
     "default": "",
-    "hint": "会追加到系统提示词末尾"
+    "hint": "留空使用内置默认语句；填写后即使识别不出人格名也会照常注入",
+    "editor_mode": true
   },
   "persona_anchor_template": {
     "description": "人格锚定模板（留空用默认）",
     "type": "text",
     "default": "",
-    "hint": "必须包含 {persona} 占位符"
+    "hint": "必须包含 {persona} 占位符；写坏（占位符缺失或多余）时会回退到默认文案",
+    "editor_mode": true
   },
   "language_anchor": {
     "description": "启用语言锚定",
@@ -53,6 +99,7 @@
     "description": "语言规则模板（留空用默认）",
     "type": "text",
     "default": "",
-    "hint": "必须包含 {lang} 占位符"
+    "hint": "必须包含 {lang} 占位符；写坏时会回退到默认文案",
+    "editor_mode": true
   }
 }
